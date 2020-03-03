@@ -7,7 +7,7 @@ from scipy.signal.windows import gaussian
 from pipert.core.component import BaseComponent
 from pipert.core.routine import Routine, Events
 from pipert.core.handlers import tick, tock
-from pipert.core.mini_logics import add_logic_to_thread, FramesFromRedis, Frames2Redis
+from pipert.core.mini_logics import MessageFromRedis, Message2Redis
 import zerorpc
 import argparse
 from urllib.parse import urlparse
@@ -117,7 +117,7 @@ class Net(nn.Module):
         grad_mag += torch.sqrt(grad_x_g ** 2 + grad_y_g ** 2)
         grad_mag += torch.sqrt(grad_x_b ** 2 + grad_y_b ** 2)
         grad_orientation = (
-                    torch.atan2(grad_y_r + grad_y_g + grad_y_b, grad_x_r + grad_x_g + grad_x_b) * (180.0 / 3.14159))
+                torch.atan2(grad_y_r + grad_y_g + grad_y_b, grad_x_r + grad_x_g + grad_x_b) * (180.0 / 3.14159))
         grad_orientation += 180.0
         grad_orientation = torch.round(grad_orientation / 45.0) * 45.0
 
@@ -166,8 +166,8 @@ class Net(nn.Module):
 
 class CannyLogic(Routine):
 
-    def __init__(self, stop_event, in_queue, out_queue, use_cuda, *args, **kwargs):
-        super().__init__(stop_event, *args, **kwargs)
+    def __init__(self, in_queue, out_queue, use_cuda, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.in_queue = in_queue
         self.out_queue = out_queue
         self.use_cuda = use_cuda
@@ -178,7 +178,8 @@ class CannyLogic(Routine):
 
     def main_logic(self, *args, **kwargs):
         try:
-            frame = self.in_queue.get(block=False)
+            msg = self.in_queue.get(block=False)
+            frame = msg.get_payload()
             frame = torch.from_numpy(frame.transpose((2, 0, 1))) / 255.
             if self.use_cuda:
                 frame = frame.cuda()
@@ -192,11 +193,12 @@ class CannyLogic(Routine):
                 self.state.dropped += 1
             except Empty:
                 pass
+            print(outputs[0])
             self.out_queue.put(outputs[0])
             return True
             # except Full:
 
-                # return False
+            # return False
 
         except Empty:
             time.sleep(0)
@@ -212,36 +214,23 @@ class CannyLogic(Routine):
 
 class Canny(BaseComponent):
 
-    def __init__(self, out_key, in_key, redis_url, field, maxlen):
+    def __init__(self, endpoint, out_key, in_key, redis_url, field, maxlen, name="Canny"):
         # TODO - is field really needed? needs testing
-        super().__init__(out_key, in_key)
+        super().__init__(endpoint, name)
         self.field = field
         self.in_queue = Queue(maxsize=1)
         self.out_queue = Queue(maxsize=1)
-        t_get_class = add_logic_to_thread(FramesFromRedis)
-        t_det_class = add_logic_to_thread(CannyLogic)
-        t_send_class = add_logic_to_thread(Frames2Redis)
 
-        t_get = t_get_class(self.stop_event, in_key, redis_url, self.in_queue, self.field, name="get_frames")
-        t_det = t_det_class(self.stop_event, self.in_queue, self.out_queue, True, name="canny")
-        t_send = t_send_class(self.stop_event, out_key, redis_url, self.out_queue, maxlen, name="send_frames")
+        r_get = MessageFromRedis(in_key, redis_url, self.in_queue).as_thread()
+        r_det = CannyLogic(self.in_queue, self.out_queue, True).as_thread()
+        r_upload_meta = Message2Redis(out_key, redis_url, self.out_queue, maxlen).as_thread()
 
-        self.thread_list = [t_get, t_det, t_send]
-        for t in self.thread_list:
-            t.add_event_handler(Events.BEFORE_LOGIC, tick)
-            t.add_event_handler(Events.AFTER_LOGIC, tock)
-
-        self._start()
-
-    def _start(self):
-        for t in self.thread_list:
-            t.daemon = True
-            t.start()
-        return self
-
-    def _inner_stop(self):
-        for t in self.thread_list:
-            t.join()
+        routines = [r_get, r_det, r_upload_meta]
+        for routine in routines:
+            routine.register_events(Events.BEFORE_LOGIC, Events.AFTER_LOGIC)
+            routine.add_event_handler(Events.BEFORE_LOGIC, tick)
+            routine.add_event_handler(Events.AFTER_LOGIC, tock)
+            self.register_routine(routine)
 
 
 if __name__ == '__main__':
@@ -257,9 +246,7 @@ if __name__ == '__main__':
     # Set up Redis connection
     url = urlparse(args.url)
 
-    zpc = zerorpc.Server(Canny(args.output, args.input, url, args.field, args.maxlen))
-    zpc.bind(f"tcp://0.0.0.0:{args.zpc}")
+    zpc = Canny(f"tcp://0.0.0.0:{args.zpc}", args.output, args.input, url, args.field, args.maxlen)
     print("run")
-    gevent.signal(signal.SIGTERM, zpc.stop)
     zpc.run()
     print("Killed")
