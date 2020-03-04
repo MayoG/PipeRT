@@ -18,9 +18,9 @@ class CV2VideoDisplay(BaseComponent):
 
         self.field = field  # .encode('utf-8')
         self.queue = Queue(maxsize=1)
-        r_get = MessageFromRedis(in_key, redis_url, self.in_queue,
+        r_get = MessageFromRedis(in_key, redis_url, self.queue,
                                  name="get_frames", component_name=self.name).as_thread()
-        r_draw = DisplayCV2(in_key, self.queue, name="draw_frames")
+        r_draw = DisplayCV2(in_key, self.queue, name="draw_frames").as_thread()
 
         routines = [r_get, r_draw]
 
