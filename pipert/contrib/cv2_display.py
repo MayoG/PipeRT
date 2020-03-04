@@ -7,46 +7,28 @@ import zerorpc
 import gevent
 import signal
 from pipert.core.routine import Events
-from pipert.core.mini_logics import FramesFromRedis, DisplayCV2, add_logic_to_thread
+from pipert.core.mini_logics import MessageFromRedis, DisplayCV2
 from pipert.core.handlers import tick, tock
 
 
 class CV2VideoDisplay(BaseComponent):
 
-    def __init__(self, output_key, in_key, redis_url, field):
-        super().__init__(output_key, in_key)
+    def __init__(self, endpoint, in_key, redis_url, field, name="CV2VideoDisplay"):
+        super().__init__(endpoint, name)
 
         self.field = field  # .encode('utf-8')
         self.queue = Queue(maxsize=1)
-        t_get_class = add_logic_to_thread(FramesFromRedis)
-        t_draw_class = add_logic_to_thread(DisplayCV2)
-        self.t_get = t_get_class(self.stop_event, in_key, redis_url, self.queue, self.field, name="get_frames")
-        self.t_draw = t_draw_class(self.stop_event, in_key, self.queue, name="draw_frames")
+        r_get = MessageFromRedis(in_key, redis_url, self.in_queue,
+                                 name="get_frames", component_name=self.name).as_thread()
+        r_draw = DisplayCV2(in_key, self.queue, name="draw_frames")
 
-        self.thread_list = [self.t_get, self.t_draw]
+        routines = [r_get, r_draw]
 
-        for t in self.thread_list:
-            t.add_event_handler(Events.BEFORE_LOGIC, tick)
-            t.add_event_handler(Events.AFTER_LOGIC, tock)
-
-        self._start()
-
-    def _start(self):
-
-        for t in self.thread_list:
-            t.daemon = True
-            t.start()
-        return self
-
-    def _inner_stop(self):
-        for t in self.thread_list:
-            t.join()
-
-    def flip_im(self):
-        self.t_get.flip = not self.t_get.flip
-
-    def negative(self):
-        self.t_draw.negative = not self.t_draw.negative
+        for routine in routines:
+            routine.register_events(Events.BEFORE_LOGIC, Events.AFTER_LOGIC)
+            routine.add_event_handler(Events.BEFORE_LOGIC, tick)
+            routine.add_event_handler(Events.AFTER_LOGIC, tock)
+            self.register_routine(routine)
 
 
 if __name__ == '__main__':
@@ -59,13 +41,8 @@ if __name__ == '__main__':
 
     # Set up Redis connection
     url = urlparse(args.url)
-    conn = redis.Redis(host=url.hostname, port=url.port)
-    if not conn.ping():
-        raise Exception('Redis unavailable')
 
-    zpc = zerorpc.Server(CV2VideoDisplay(None, args.input, url, args.field))
-    zpc.bind(f"tcp://0.0.0.0:{args.zpc}")
+    zpc = CV2VideoDisplay(f"tcp://0.0.0.0:{args.zpc}", args.input, url, args.field)
     print("run")
-    gevent.signal(signal.SIGTERM, zpc.stop)
     zpc.run()
     print("Killed")
