@@ -3,6 +3,7 @@ import torch
 from pipert.core.message import PredictionPayload
 from pipert.utils.structures import Instances, Boxes
 from pipert.core.component import BaseComponent
+from pipert.core.message import Message
 from queue import Queue, Empty
 import argparse
 from urllib.parse import urlparse
@@ -19,16 +20,17 @@ from pipert.core.handlers import tick, tock
 
 class FaceDetLogic(Routine):
 
-    def __init__(self, in_queue, out_queue):
+    def __init__(self, in_queue, out_queue, out_frame_queue):
         super().__init__()
         self.in_queue = in_queue
         self.out_queue = out_queue
+        self.out_frame_queue = out_frame_queue
         self.face_cas = None
 
     def main_logic(self, *args, **kwargs):
         try:
-            msg = self.in_queue.get(block=False)
-            frame = msg.get_payload()
+            frame_msg = self.in_queue.get(block=False)
+            frame = frame_msg.get_payload()
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             faces = self.face_cas.detectMultiScale(
@@ -54,8 +56,9 @@ class FaceDetLogic(Routine):
             except Empty:
                 pass
 
-            msg.payload = PredictionPayload(new_instances)
-            self.out_queue.put(msg, block=False)
+            pred_msg = Message(new_instances, frame_msg.source_address)
+            self.out_frame_queue.put(frame_msg, block=False)
+            self.out_queue.put(pred_msg, block=False)
             return True
 
         except Empty:
@@ -73,17 +76,19 @@ class FaceDetLogic(Routine):
 
 class FaceDetComponent(BaseComponent):
 
-    def __init__(self, endpoint, in_key, out_key, redis_url, maxlen=100, name="FaceDetection"):
+    def __init__(self, endpoint, in_key, out_key, out_frame_key, redis_url, maxlen=100, name="FaceDetection"):
         super().__init__(endpoint, name)
         # TODO: should queue maxsize be configurable?
         self.in_queue = Queue(maxsize=1)
         self.out_queue = Queue(maxsize=1)
+        self.out_frame_queue = Queue(maxsize=1)
 
         r_get = MessageFromRedis(in_key, redis_url, self.in_queue).as_thread()
-        r_sort = FaceDetLogic(self.in_queue, self.out_queue).as_thread()
+        r_sort = FaceDetLogic(self.in_queue, self.out_queue, self.out_frame_queue).as_thread()
         r_upload_meta = Message2Redis(out_key, redis_url, self.out_queue, maxlen).as_thread()
+        r_upload_frame = Message2Redis(out_frame_key, redis_url, self.out_frame_queue, maxlen).as_thread()
 
-        routines = [r_get, r_sort, r_upload_meta]
+        routines = [r_get, r_sort, r_upload_meta, r_upload_frame]
         for routine in routines:
             # routine.register_events(Events.BEFORE_LOGIC, Events.AFTER_LOGIC)
             # routine.add_event_handler(Events.BEFORE_LOGIC, tick)
@@ -95,6 +100,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', help='Input stream key name', type=str, default='camera:2')
     parser.add_argument('-o', '--output', help='Output stream key name', type=str, default='camera:3')
+    parser.add_argument('-of', '--outputFrame', help='Output Frame stream key name', type=str, default='camera:4')
     parser.add_argument('-u', '--url', help='Redis URL', type=str, default='redis://127.0.0.1:6379')
     parser.add_argument('-z', '--zpc', help='zpc port', type=str, default='4248')
     parser.add_argument('--maxlen', help='Maximum length of output stream', type=int, default=100)
@@ -103,7 +109,7 @@ if __name__ == '__main__':
 
     url = urlparse(opt.url)
 
-    zpc = FaceDetComponent(f"tcp://0.0.0.0:{opt.zpc}", opt.input, opt.output, url, maxlen=opt.maxlen)
+    zpc = FaceDetComponent(f"tcp://0.0.0.0:{opt.zpc}", opt.input, opt.output, opt.outputFrame, url, maxlen=opt.maxlen)
     print("run")
     zpc.run()
     print("Killed")
