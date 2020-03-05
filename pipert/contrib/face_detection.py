@@ -54,9 +54,7 @@ class FaceDetLogic(Routine):
             except Empty:
                 pass
 
-            # Not sure if like should do this like that
             msg.payload = PredictionPayload(new_instances)
-            # msg.update_payload(new_instances)
             self.out_queue.put(msg, block=False)
             return True
 
