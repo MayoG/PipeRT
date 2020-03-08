@@ -152,15 +152,15 @@ class MessageFromRedis(Routine):
 
 
 class DisplayCV2(Routine):
-    def __init__(self, in_key, queue, *args, **kwargs):
+    def __init__(self, queue, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.in_key = in_key
         self.queue = queue
         self.negative = False
 
     def main_logic(self, *args, **kwargs):
         try:
-            frame = self.queue.get(block=False)
+            msg = self.queue.get(block=False)
+            frame = msg.get_payload()
             if self.negative:
                 frame = 255 - frame
             cv2.imshow('Display', frame)
