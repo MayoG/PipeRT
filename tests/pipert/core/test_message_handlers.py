@@ -19,6 +19,12 @@ def test_redis_send(redis_handler):
     assert msg.decode() == "A"
 
 
+def test_receive_does_not_change_last_message_id_stay_none_when_no_msg_received(redis_handler):
+    msg = redis_handler.receive(key)
+    assert msg is None
+    assert redis_handler.last_msg_id is None
+
+
 # tests if the method read the last message if it didn't read before
 def test_redis_read_next_msg_reads_last_message(redis_handler):
     redis_handler.send(key, "AAA")
